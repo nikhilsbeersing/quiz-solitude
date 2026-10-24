@@ -26,6 +26,8 @@ img.qi{max-width:100%;border-radius:12px;margin-top:10px}.rw{display:flex;gap:8p
 <script type="module">
 import {firebaseConfig,ADMIN_EMAIL,ANSWER_SECONDS} from "./firebase-config.js";
 import {SEED} from "./seed.js";
+const RUSE_SECONDS=45,VOTE_SECONDS=30;
+const BCATS=["Geography","History","Science","Animals","Body & Space","Food & Drink","Sports","Arts & Entertainment","Tech & Words","Mauritius & Maths","General Knowledge"];
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {getAuth,signInAnonymously,onAuthStateChanged,signInWithEmailAndPassword,signOut} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {getFirestore,doc,getDoc,setDoc,updateDoc,deleteDoc,collection,getDocs,addDoc,onSnapshot,query,where,writeBatch} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -34,14 +36,16 @@ const fb=initializeApp(firebaseConfig),auth=getAuth(fb),db=getFirestore(fb);
 const $app=document.getElementById('app');
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const L=['A','B','C','D'];
-let uid,isAdmin=false,unsubs=[],tick=null,G=null,P=[],code='',myAns={},ld={},QS=[];
+let uid,isAdmin=false,unsubs=[],tick=null,G=null,P=[],code='',myAns={},ld={},QS=[],OPTS=[],myRuse={},myVote={};
 let myName=localStorage.getItem('qa_name')||'';
 const gdoc=()=>doc(db,'games',code);
 const clear=()=>{unsubs.forEach(u=>u());unsubs=[];clearInterval(tick)};
 const go=f=>{clear();f()};
 const score=(p,res)=>Object.keys(res||{}).filter(k=>p.ans&&p.ans[k]&&p.ans[k].c===res[k]).length*100;
-const board=()=>P.map(p=>({n:p.name,s:score(p,G?.results)})).sort((a,b)=>b.s-a.s);
-const boardHtml=()=>{const b=board();return b.length?b.map((x,i)=>`<div class="row"><span>${i+1}. ${esc(x.n)}</span><b>${x.s}</b></div>`).join(''):'<p class="mut">No players yet.</p>'};
+const board=()=>P.map(p=>({n:p.name,s:G?.mode==='bluff'?((G.scores||{})[p.id]||0):score(p,G?.results),g:G?.mode==='bluff'?((G.gains||{})[p.id]||0):0})).sort((a,b)=>b.s-a.s);
+const nameOf=u=>(P.find(p=>p.id===u)||{}).name||'?';
+const norm=t=>String(t||'').toLowerCase().replace(/[^a-z0-9à-ÿ]/g,'');
+const boardHtml=()=>{const b=board();return b.length?b.map((x,i)=>`<div class="row"><span>${i+1}. ${esc(x.n)}</span><b>${x.s}${x.g?` <span class="mut">(+${x.g})</span>`:''}</b></div>`).join(''):'<p class="mut">No players yet.</p>'};
 
 onAuthStateChanged(auth,u=>{
   if(!u){signInAnonymously(auth).catch(e=>$app.innerHTML='<div class="card">Sign-in failed: '+esc(e.message)+'<br>Check README step 2 (enable Anonymous auth).</div>');return}
@@ -53,33 +57,60 @@ function home(){
   <input id="nm" placeholder="Your nickname" maxlength="16" value="${esc(myName)}">
   <input id="cd" placeholder="Game code" maxlength="4" style="text-transform:uppercase">
   <button class="btn" id="jn">Join game</button><p class="mut" id="msg"></p></div>
-  ${isAdmin?`<div class="card"><div class="q">Host a live round</div>
-   <select id="cat"><option value="">All subjects</option><option>History</option><option>Maths</option><option>Science</option></select>
-   <select id="cnt"><option value="5">5 questions</option><option value="10">10 questions</option><option value="15">15 questions</option><option value="999" selected>All questions</option></select>
-   <label class="mut"><input type="checkbox" id="sh" checked style="width:auto"> Shuffle questions</label>
+  ${isAdmin?`<div class="card"><div class="q">Host a live game</div>
+   <select id="mode"><option value="bluff">Bluff game (Finto style)</option><option value="quiz">Multiple-choice quiz</option></select>
+   <select id="cat"></select>
+   <select id="cnt"></select>
    <button class="btn" id="cg">Create game</button><button class="btn o" id="qs">Manage questions</button>
-   <button class="btn o" id="so">Sign out admin</button></div>`
+   <button class="btn o" id="so">Sign out admin</button><p class="mut" id="hm"></p></div>`
   :`<p class="mut" style="text-align:center"><a href="#" id="al" style="color:var(--pri2)">Admin login</a></p>`}`;
   const m=document.getElementById('msg');
   document.getElementById('jn').onclick=async()=>{
     const n=document.getElementById('nm').value.trim(),c=document.getElementById('cd').value.trim().toUpperCase();
     if(!n||c.length<4){m.textContent='Enter a nickname and the 4-letter code.';return}
     try{const g=await getDoc(doc(db,'games',c));if(!g.exists()){m.textContent='Game not found.';return}
-      myName=n;localStorage.setItem('qa_name',n);code=c;myAns={};ld={};
-      await setDoc(doc(db,'players',uid),{game:c,name:n,ans:{}});go(play)}catch(e){m.textContent='Could not join: '+e.message}};
+      myName=n;localStorage.setItem('qa_name',n);code=c;myAns={};myRuse={};myVote={};ld={};
+      await setDoc(doc(db,'players',uid),{game:c,name:n,ans:{},ruse:{},vote:{}});go(play)}catch(e){m.textContent='Could not join: '+e.message}};
   if(isAdmin){
     document.getElementById('qs').onclick=()=>go(admin);
     document.getElementById('so').onclick=()=>signOut(auth);
+    const mode=document.getElementById('mode'),cat=document.getElementById('cat'),cnt=document.getElementById('cnt'),hm=document.getElementById('hm');
+    const fill=()=>{const b=mode.value==='bluff';
+      cat.innerHTML='<option value="">All subjects</option>'+(b?BCATS:['History','Maths','Science']).map(c=>`<option>${c}</option>`).join('');
+      cnt.innerHTML=(b?[5,8,10,12]:[5,10,15,999]).map(n=>`<option value="${n}" ${n===(b?8:999)?'selected':''}>${n===999?'All questions':n+(b?' rounds':' questions')}</option>`).join('')};
+    mode.onchange=fill;fill();
     document.getElementById('cg').onclick=async()=>{
-      const s=await getDocs(collection(db,'questions'));let q=s.docs.map(d=>d.data());
-      const cat=document.getElementById('cat').value;if(cat)q=q.filter(x=>x.cat===cat);
-      if(!q.length){alert('No questions found. Use Manage questions > Import starter questions.');return}
-      q.sort((a,b)=>(a.at||0)-(b.at||0));
-      if(document.getElementById('sh').checked)q.sort(()=>Math.random()-.5);
-      QS=q.slice(0,+document.getElementById('cnt').value);
+      hm.textContent='Preparing…';
+      try{
+      let q;
+      if(mode.value==='bluff'){
+        q=await loadBluff(hm);
+        if(cat.value)q=q.filter(x=>x.c===cat.value);
+        q.sort(()=>Math.random()-.5);
+      }else{
+        const s=await getDocs(collection(db,'questions'));q=s.docs.map(d=>d.data());
+        if(cat.value)q=q.filter(x=>x.cat===cat.value);
+        q.sort((a,b)=>(a.at||0)-(b.at||0));if(!q.length){hm.textContent='No quiz questions. Use Manage questions > Import.';return}
+        q.sort(()=>Math.random()-.5);
+      }
+      if(!q.length){hm.textContent='No questions found.';return}
+      QS=q.slice(0,+cnt.value);
       code=Array.from({length:4},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random()*24)]).join('');
-      await setDoc(gdoc(),{state:'lobby',qi:-1,results:{},total:QS.length});go(host)}
+      await setDoc(gdoc(),{mode:mode.value,state:'lobby',qi:-1,results:{},scores:{},total:QS.length});go(host)
+      }catch(e){hm.textContent='Error: '+e.message}}
   }else document.getElementById('al').onclick=e=>{e.preventDefault();go(login)};
+}
+
+async function loadBluff(msg){
+  let s=await getDocs(collection(db,'bluff'));
+  if(s.empty){if(msg)msg.textContent='First run: importing 1000+ questions…';await importBluff();s=await getDocs(collection(db,'bluff'))}
+  return s.docs.flatMap(d=>d.data().items||[]);
+}
+async function importBluff(){
+  const {BANK}=await import('./bank.js');
+  for(let i=0;i<BANK.length;i+=100){
+    await setDoc(doc(db,'bluff','b'+String(i/100).padStart(2,'0')),{items:BANK.slice(i,i+100).map(x=>({c:x[0],q:x[1],a:x[2]}))});
+  }
 }
 function login(){
   $app.innerHTML=`<div class="card"><div class="q">Admin login</div><input id="em" type="email" placeholder="Admin email"><input id="pw" type="password" placeholder="Password">
@@ -98,7 +129,9 @@ async function admin(){
   <p class="mut">Select the radio next to the correct answer.</p>
   <input id="im" placeholder="Optional image path or URL (e.g. images/hibiscus.png)">
   <button class="btn" id="sv">Save question</button><p class="mut" id="am"></p></div>
-  <div class="card"><button class="btn o" id="sd">Import 40 starter questions</button></div>
+  <div class="card"><div class="q">Bluff questions</div><p class="mut">Import (or refresh) the built-in 1000+ bluff questions.</p><button class="btn o" id="ib">Import bluff questions</button>
+  <input id="bq" placeholder="Custom bluff question"><input id="ba" placeholder="Real answer (short)" maxlength="60"><select id="bc">${BCATS.map(c=>`<option>${c}</option>`).join('')}</select><button class="btn" id="ab">Add bluff question</button><p class="mut" id="bm"></p></div>
+  <div class="card"><button class="btn o" id="sd">Import 40 multiple-choice starter questions</button></div>
   <div class="card"><div class="q">All questions</div><div id="ql">Loading…</div></div>`;
   document.getElementById('bk').onclick=()=>go(home);
   const list=async()=>{const s=await getDocs(collection(db,'questions')),el=document.getElementById('ql');
@@ -106,6 +139,10 @@ async function admin(){
     el.innerHTML=s.docs.sort((a,b)=>(a.data().at||0)-(b.data().at||0)).map(d=>{const q=d.data();return `<div class="row"><span>[${esc(q.cat)}] ${esc(q.text)}<br><span class="mut">✔ ${L[q.correct]}. ${esc(q.options[q.correct])}</span></span><button class="btn d sm" data-id="${d.id}">Delete</button></div>`}).join('');
     el.querySelectorAll('button').forEach(b=>b.onclick=async()=>{await deleteDoc(doc(db,'questions',b.dataset.id));list()})};
   list();
+  document.getElementById('ib').onclick=async()=>{const m=document.getElementById('bm');m.textContent='Importing…';try{await importBluff();m.textContent='Imported ✔'}catch(e){m.textContent='Error: '+e.message}};
+  document.getElementById('ab').onclick=async()=>{const q=document.getElementById('bq').value.trim(),a=document.getElementById('ba').value.trim(),m=document.getElementById('bm');
+    if(!q||!a){m.textContent='Fill both fields.';return}
+    await setDoc(doc(db,'bluff','c'+Date.now()),{items:[{c:document.getElementById('bc').value,q,a}]});m.textContent='Added ✔';document.getElementById('bq').value='';document.getElementById('ba').value=''};
   document.getElementById('sd').onclick=async()=>{const b=writeBatch(db);
     SEED.forEach((s,i)=>b.set(doc(db,'questions','s'+String(i+1).padStart(2,'0')),{cat:s[0],text:s[1],options:s[2],correct:s[3],img:'',at:1700000000000+i}));
     await b.commit();document.getElementById('am').textContent='Imported ✔';list()};
@@ -115,63 +152,128 @@ async function admin(){
     m.textContent='Saved ✔';document.getElementById('qt').value='';document.querySelectorAll('.op').forEach(i=>i.value='');list()};
 }
 
+/* shared reveal view for bluff mode */
+function revealHtml(){
+  const lucky=(G.lucky||[]).map(nameOf);
+  return (G.opts||[]).map((t,i)=>{
+    const own=(G.owners[i]||'').split(',').filter(Boolean).map(nameOf),pk=P.filter(p=>G.picks&&G.picks[p.id]===i).map(p=>p.name);
+    return `<div class="opt ${i===G.correct?'ok':''}"><b>${i===G.correct?'✔':'✎'}</b><span>${esc(t)}<br><span class="mut">${i===G.correct?'Real answer':'Bluff by '+esc(own.join(' & '))}${pk.length?' · picked by '+esc(pk.join(', ')):''}</span></span></div>`}).join('')
+    +(lucky.length?`<p class="mut">🍀 ${esc(lucky.join(', '))} typed the real answer (+3).</p>`:'');
+}
+
 /* HOST */
 function host(){
-  let busy=false;
+  let busy=false,h='',LUCKY=[];
   unsubs.push(onSnapshot(gdoc(),s=>{G=s.data();draw()}));
-  unsubs.push(onSnapshot(query(collection(db,'players'),where('game','==',code)),s=>{P=s.docs.map(d=>d.data());draw();auto()}));
+  unsubs.push(onSnapshot(query(collection(db,'players'),where('game','==',code)),s=>{P=s.docs.map(d=>({id:d.id,...d.data()}));draw();auto()}));
   tick=setInterval(()=>{auto();const t=document.getElementById('tm');if(t&&G?.deadline)t.textContent=Math.max(0,Math.ceil((G.deadline-Date.now())/1000))},500);
+  const cnt=(f,k)=>P.filter(p=>p[f]&&p[f][G.qi]!==undefined).length;
+  const up=o=>updateDoc(gdoc(),o);
   function auto(){
-    if(!G||G.state!=='question')return;
-    const a=P.filter(p=>p.ans&&p.ans[G.qi]).length;
-    if(!G.deadline&&a&&!busy){busy=true;const n=Date.now();updateDoc(gdoc(),{deadline:n+ANSWER_SECONDS*1000,hostNow:n}).finally(()=>busy=false)}
-    else if((G.deadline&&Date.now()>G.deadline)||(P.length&&a===P.length))reveal()}
-  async function reveal(){if(busy||G.state!=='question')return;busy=true;
-    const c=QS[G.qi].correct;await updateDoc(gdoc(),{state:'reveal',correct:c,['results.'+G.qi]:c});busy=false}
-  async function next(){const i=G.qi+1;
-    if(i>=QS.length)return updateDoc(gdoc(),{state:'end'});
-    const q=QS[i];await updateDoc(gdoc(),{state:'question',qi:i,q:{text:q.text,options:q.options,img:q.img||''},deadline:null,hostNow:null,correct:null})}
+    if(!G||busy)return;const k=G.qi+'-'+G.state;if(h===k)return;
+    if(G.mode==='bluff'){
+      if(G.state==='ruse'&&(Date.now()>G.deadline||(P.length&&cnt('ruse')===P.length)))toVote();
+      else if(G.state==='vote'&&(Date.now()>G.deadline||(P.length&&cnt('vote')>=P.length)))revealB();
+    }else if(G.state==='question'){
+      const a=cnt('ans');
+      if(!G.deadline&&a){busy=true;const n=Date.now();up({deadline:n+ANSWER_SECONDS*1000,hostNow:n}).finally(()=>busy=false)}
+      else if((G.deadline&&Date.now()>G.deadline)||(P.length&&a===P.length))revealQ();
+    }
+  }
+  async function toVote(){
+    busy=true;h=G.qi+'-ruse';
+    const tn=norm(QS[G.qi].a),map=new Map();LUCKY=[];
+    P.forEach(p=>{const r=((p.ruse&&p.ruse[G.qi])||'').trim(),n=norm(r);if(!n)return;
+      if(n===tn){LUCKY.push(p.id);return}
+      if(!map.has(n))map.set(n,{t:r,owners:[]});map.get(n).owners.push(p.id)});
+    OPTS=[{t:QS[G.qi].a,owners:null},...map.values()].sort(()=>Math.random()-.5);
+    const n=Date.now();
+    await up({state:'vote',opts:OPTS.map(o=>o.t),deadline:n+VOTE_SECONDS*1000,hostNow:n});busy=false}
+  async function revealB(){
+    busy=true;h=G.qi+'-vote';
+    const gains={},picks={},ci=OPTS.findIndex(o=>o.owners===null),add=(u,v)=>gains[u]=(gains[u]||0)+v;
+    LUCKY.forEach(u=>add(u,3));
+    P.forEach(p=>{const v=p.vote&&p.vote[G.qi];if(v===undefined||!OPTS[v]||LUCKY.includes(p.id))return;picks[p.id]=v;
+      if(v===ci)add(p.id,3);else OPTS[v].owners.forEach(o=>{if(o!==p.id)add(o,2)})});
+    const scores={...(G.scores||{})};for(const u in gains)scores[u]=(scores[u]||0)+gains[u];
+    await up({state:'reveal',correct:ci,owners:OPTS.map(o=>o.owners?o.owners.join(','):''),picks,lucky:LUCKY,gains,scores});busy=false}
+  async function revealQ(){
+    busy=true;h=G.qi+'-question';const c=QS[G.qi].correct;
+    await up({state:'reveal',correct:c,['results.'+G.qi]:c});busy=false}
+  async function next(){
+    const i=G.qi+1;if(i>=QS.length)return up({state:'end'});
+    const q=QS[i],n=Date.now();
+    if(G.mode==='bluff')await up({state:'ruse',qi:i,q:{text:q.q,cat:q.c},opts:null,owners:null,picks:null,lucky:null,gains:null,correct:null,deadline:n+RUSE_SECONDS*1000,hostNow:n});
+    else await up({state:'question',qi:i,q:{text:q.text,options:q.options,img:q.img||''},deadline:null,hostNow:null,correct:null})}
   function draw(){
-    if(!G)return;
-    let h=`<div class="card"><div class="mut" style="text-align:center">Game code — tell your friends</div><div class="code">${code}</div><div class="mut" style="text-align:center">${P.length} player${P.length===1?'':'s'} joined</div></div>`;
-    if(G.state==='lobby')h+=`<div class="card">${boardHtml()}<button class="btn" id="nx">Start game</button></div>`;
-    else if(G.state==='question')h+=`<div class="card"><div class="mut">Question ${G.qi+1}/${G.total}</div><div class="q">${esc(G.q.text)}</div>${G.q.img?`<img class="qi" src="${esc(G.q.img)}">`:''}
+    if(!G)return;const bl=G.mode==='bluff';
+    let h2=`<div class="card"><div class="mut" style="text-align:center">Game code — tell your friends</div><div class="code">${code}</div><div class="mut" style="text-align:center">${P.length} player${P.length===1?'':'s'} joined · ${bl?'Bluff game':'Quiz'}</div></div>`;
+    if(G.state==='lobby')h2+=`<div class="card">${boardHtml()}<button class="btn" id="nx">Start game</button></div>`;
+    else if(G.state==='ruse')h2+=`<div class="card"><div class="mut">Round ${G.qi+1}/${G.total} · ${esc(G.q.cat)}</div><div class="q">${esc(G.q.text)}</div><p class="mut">Players are writing their bluffs…</p><div class="timer" id="tm">${RUSE_SECONDS}</div><p class="mut">${cnt('ruse')}/${P.length} bluffs in</p><button class="btn o" id="sk">Skip to voting</button></div>`;
+    else if(G.state==='vote')h2+=`<div class="card"><div class="mut">Round ${G.qi+1}/${G.total}</div><div class="q">${esc(G.q.text)}</div>${G.opts.map(o=>`<div class="opt"><b>•</b>${esc(o)}</div>`).join('')}<div class="timer" id="tm">${VOTE_SECONDS}</div><p class="mut">${cnt('vote')}/${P.length} voted</p><button class="btn o" id="sk">Reveal now</button></div>`;
+    else if(G.state==='question')h2+=`<div class="card"><div class="mut">Question ${G.qi+1}/${G.total}</div><div class="q">${esc(G.q.text)}</div>${G.q.img?`<img class="qi" src="${esc(G.q.img)}">`:''}
       ${G.q.options.map((o,i)=>`<div class="opt"><b>${L[i]}</b>${esc(o)}</div>`).join('')}
       <p class="mut">${G.deadline?'First answer in! Time left:':'Waiting for the first answer…'}</p><div class="timer" id="tm">${G.deadline?ANSWER_SECONDS:'…'}</div>
-      <p class="mut">${P.filter(p=>p.ans&&p.ans[G.qi]).length}/${P.length} answered</p><button class="btn o" id="rv">Reveal now</button></div>`;
-    else if(G.state==='reveal')h+=`<div class="card"><div class="q">Correct: ${L[G.correct]}. ${esc(QS[G.qi].options[G.correct])}</div>${boardHtml()}<button class="btn" id="nx">${G.qi+1>=QS.length?'Finish':'Next question'}</button></div>`;
-    else h+=`<div class="card"><div class="q">🏆 Final scores</div>${boardHtml()}</div>`;
-    $app.innerHTML=h+`<button class="btn o" id="ex">Leave</button>`;
-    const n=document.getElementById('nx');if(n)n.onclick=next;const r=document.getElementById('rv');if(r)r.onclick=reveal;
+      <p class="mut">${cnt('ans')}/${P.length} answered</p><button class="btn o" id="sk">Reveal now</button></div>`;
+    else if(G.state==='reveal')h2+=bl?`<div class="card"><div class="q">${esc(G.q.text)}</div>${revealHtml()}<div class="q" style="margin-top:12px">Scores</div>${boardHtml()}<button class="btn" id="nx">${G.qi+1>=G.total?'Finish':'Next round'}</button></div>`
+      :`<div class="card"><div class="q">Correct: ${L[G.correct]}. ${esc(QS[G.qi].options[G.correct])}</div>${boardHtml()}<button class="btn" id="nx">${G.qi+1>=G.total?'Finish':'Next question'}</button></div>`;
+    else h2+=`<div class="card"><div class="q">🏆 Final scores</div>${boardHtml()}</div>`;
+    $app.innerHTML=h2+`<button class="btn o" id="ex">Leave</button>`;
+    const n=document.getElementById('nx');if(n)n.onclick=next;
+    const r=document.getElementById('sk');if(r)r.onclick=()=>{if(G.state==='ruse')toVote();else if(G.state==='vote')revealB();else revealQ()};
     document.getElementById('ex').onclick=()=>go(home)}
 }
 
 /* PLAYER */
 function play(){
+  let lastKey='';
+  const keyOf=()=>G.qi+'-'+G.state;
   unsubs.push(onSnapshot(gdoc(),s=>{G=s.data();
-    if(G&&G.deadline&&!ld[G.qi])ld[G.qi]=Date.now()+(G.deadline-(G.hostNow||Date.now()));
+    if(G&&G.deadline&&!ld[keyOf()])ld[keyOf()]=Date.now()+(G.deadline-(G.hostNow||Date.now()));
     draw()}));
-  unsubs.push(onSnapshot(query(collection(db,'players'),where('game','==',code)),s=>{P=s.docs.map(d=>d.data());draw()}));
-  const left=()=>G&&ld[G.qi]?Math.max(0,Math.ceil((ld[G.qi]-Date.now())/1000)):null;
-  tick=setInterval(()=>{const t=document.getElementById('tm'),r=left();if(t&&r!==null){t.textContent=r;if(r===0)draw()}},300);
+  unsubs.push(onSnapshot(query(collection(db,'players'),where('game','==',code)),s=>{P=s.docs.map(d=>({id:d.id,...d.data()}));draw()}));
+  const left=()=>G&&ld[keyOf()]?Math.max(0,Math.ceil((ld[keyOf()]-Date.now())/1000)):null;
+  tick=setInterval(()=>{const t=document.getElementById('tm'),r=left();if(t&&r!==null){t.textContent=r;if(r===0&&G.mode!=='bluff')draw()}},300);
+  const save=o=>setDoc(doc(db,'players',uid),{game:code,name:myName,...o},{merge:true});
   async function pick(i){if(myAns[G.qi]||left()===0)return;myAns[G.qi]={c:i};draw();
-    try{await setDoc(doc(db,'players',uid),{game:code,name:myName,ans:{[G.qi]:{c:i}}},{merge:true})}catch(e){delete myAns[G.qi];draw()}}
+    try{await save({ans:{[G.qi]:{c:i}}})}catch(e){delete myAns[G.qi];draw()}}
+  async function vote(i){if(myVote[G.qi]!==undefined)return;myVote[G.qi]=i;draw();
+    try{await save({vote:{[G.qi]:i}})}catch(e){delete myVote[G.qi];draw()}}
+  async function ruse(){const t=document.getElementById('ru').value.trim();if(!t||myRuse[G.qi])return;myRuse[G.qi]=t;draw();
+    try{await save({ruse:{[G.qi]:t}})}catch(e){delete myRuse[G.qi];draw()}}
   function draw(){
     if(!G){$app.innerHTML='<div class="card">Connecting…</div>';return}
+    const bl=G.mode==='bluff',k=G.state+'|'+G.qi+'|'+!!myRuse[G.qi];
+    if(G.state==='ruse'&&k===lastKey)return;   // don't wipe the text box while typing
+    lastKey=k;
     let h=`<div class="card"><div class="mut">Game ${code} · ${esc(myName)}</div>`;
     if(G.state==='lobby')h+=`<div class="q">Waiting for the host to start…</div><p class="mut">${P.length} joined</p>`;
+    else if(G.state==='ruse'){
+      h+=`<div class="mut">Round ${G.qi+1}/${G.total} · ${esc(G.q.cat)}</div><div class="q">${esc(G.q.text)}</div><div class="timer" id="tm">${left()??''}</div>`;
+      h+=myRuse[G.qi]?`<p class="mut" style="text-align:center">Bluff locked in ✔<br>“${esc(myRuse[G.qi])}”<br>Waiting for the others…</p>`
+        :`<p class="mut">YOUR RUSE — trick the others with a convincing fake answer.</p><input id="ru" maxlength="60" placeholder="Type your answer…" autocomplete="off"><button class="btn" id="rs">Submit bluff</button>`}
+    else if(G.state==='vote'){
+      const mv=myVote[G.qi],mine=norm(myRuse[G.qi]);
+      h+=`<div class="mut">Round ${G.qi+1}/${G.total}</div><div class="q">${esc(G.q.text)}</div><p class="mut">Which one is the real answer?</p>
+      ${G.opts.map((o,i)=>`<button class="opt ${mv===i?'sel':''}" data-v="${i}" ${mv!==undefined||(mine&&norm(o)===mine)?'disabled':''}><b>•</b>${esc(o)}${mine&&norm(o)===mine?' (your bluff)':''}</button>`).join('')}
+      <div class="timer" id="tm">${left()??''}</div><p class="mut" style="text-align:center">${mv!==undefined?'Vote locked in ✔':'Pick the real answer'}</p>`}
     else if(G.state==='question'){const mine=myAns[G.qi],lock=mine||left()===0;
       h+=`<div class="mut">Question ${G.qi+1}/${G.total}</div><div class="q">${esc(G.q.text)}</div>${G.q.img?`<img class="qi" src="${esc(G.q.img)}">`:''}
       ${G.q.options.map((o,i)=>`<button class="opt ${mine&&mine.c===i?'sel':''}" data-i="${i}" ${lock?'disabled':''}><b>${L[i]}</b>${esc(o)}</button>`).join('')}
       <div class="timer" id="tm">${left()??''}</div>
       <p class="mut" style="text-align:center">${mine?'Answer locked in ✔':left()===0?'Time’s up!':G.deadline?'Someone answered! Hurry!':'Pick an answer'}</p>`}
-    else if(G.state==='reveal'){const m=myAns[G.qi];
-      h+=`<div class="q">${m&&m.c===G.correct?'✅ Correct! +100':'❌ '+(m?'Wrong':'No answer')}</div>
-      ${G.q.options.map((o,i)=>`<div class="opt ${i===G.correct?'ok':(m&&m.c===i?'bad':'')}"><b>${L[i]}</b>${esc(o)}</div>`).join('')}
-      <div class="q" style="margin-top:14px">Scores</div>${boardHtml()}`}
+    else if(G.state==='reveal'){
+      if(bl){const g=(G.gains||{})[uid]||0;
+        h+=`<div class="q">${g>0?'+'+g+' points!':'No points this round'}</div>${revealHtml()}<div class="q" style="margin-top:14px">Scores</div>${boardHtml()}`}
+      else{const m=myAns[G.qi];
+        h+=`<div class="q">${m&&m.c===G.correct?'✅ Correct! +100':'❌ '+(m?'Wrong':'No answer')}</div>
+        ${G.q.options.map((o,i)=>`<div class="opt ${i===G.correct?'ok':(m&&m.c===i?'bad':'')}"><b>${L[i]}</b>${esc(o)}</div>`).join('')}
+        <div class="q" style="margin-top:14px">Scores</div>${boardHtml()}`}}
     else h+=`<div class="q">🏆 Final scores</div>${boardHtml()}`;
     $app.innerHTML=h+`</div><button class="btn o" id="ex">Leave</button>`;
-    $app.querySelectorAll('button.opt').forEach(b=>b.onclick=()=>pick(+b.dataset.i));
+    $app.querySelectorAll('button.opt[data-i]').forEach(b=>b.onclick=()=>pick(+b.dataset.i));
+    $app.querySelectorAll('button.opt[data-v]').forEach(b=>b.onclick=()=>vote(+b.dataset.v));
+    const rs=document.getElementById('rs');if(rs){rs.onclick=ruse;document.getElementById('ru').onkeydown=e=>{if(e.key==='Enter')ruse()}}
     document.getElementById('ex').onclick=()=>go(home)}
 }
 </script></body></html>
